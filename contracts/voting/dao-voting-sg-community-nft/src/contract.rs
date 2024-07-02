@@ -2,7 +2,7 @@
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
     to_json_binary, Addr, Binary, Deps, DepsMut, Empty, Env, MessageInfo, Response, StdError,
-    StdResult, Uint128,
+    StdResult, Storage, SubMsg, Uint128,
 };
 use cw2::{get_contract_version, set_contract_version, ContractVersion};
 use cw_storage_plus::Bound;
@@ -61,6 +61,7 @@ pub fn execute(
         ExecuteMsg::SetVotingPower { token_id, power } => {
             execute_set_voting_power(deps, env, info, token_id, power)
         }
+        ExecuteMsg::Sync { token_id } => execute_sync(deps, env, token_id),
         ExecuteMsg::AddHook { addr } => execute_add_hook(deps, info, addr),
         ExecuteMsg::RemoveHook { addr } => execute_remove_hook(deps, info, addr),
         ExecuteMsg::UpdateOwnership(action) => execute_update_owner(deps, info, env, action),
@@ -149,31 +150,7 @@ pub fn execute_unregister(
         return Err(ContractError::NotRegistered {});
     };
 
-    // Remove voter from token.
-    VOTER_TOKENS.remove(deps.storage, &info.sender);
-    TOKENS.update(deps.storage, &token_id, |token| -> StdResult<_> {
-        let mut token = token.expect("token should exist but could not be found");
-        token.voter = None;
-        Ok(token)
-    })?;
-
-    let curr_voting_power = VOTER_VOTING_POWER.load(deps.storage, &info.sender)?;
-
-    // Remove voter's VP and update total VP.
-    VOTER_VOTING_POWER.remove(deps.storage, &info.sender, env.block.height)?;
-    TOTAL_VOTING_POWER.update(deps.storage, env.block.height, |total| -> StdResult<_> {
-        total
-            .expect("total voting power should be set but could not be found")
-            .checked_sub(curr_voting_power)
-            .map_err(StdError::overflow)
-    })?;
-
-    let hook_msgs = unstake_nft_hook_msgs(
-        HOOKS,
-        deps.storage,
-        info.sender.clone(),
-        vec![token_id.clone()],
-    )?;
+    let hook_msgs = unregister_voter(deps.storage, &env, &info.sender, &token_id)?;
 
     Ok(Response::default()
         .add_submessages(hook_msgs)
@@ -253,6 +230,39 @@ pub fn execute_set_voting_power(
     }
 }
 
+pub fn execute_sync(deps: DepsMut, env: Env, token_id: String) -> Result<Response, ContractError> {
+    let token = TOKENS.may_load(deps.storage, &token_id)?;
+
+    let mut response = Response::default()
+        .add_attribute("action", "sync")
+        .add_attribute("token_id", token_id.clone());
+
+    // If the token has been registered by a voter, ensure they still own it.
+    if let Some(voter) = token.as_ref().and_then(|t| t.voter.as_ref()) {
+        // Make sure voter owns exactly one NFT and it's still this one.
+        let nft = NFT_CONTRACT.load(deps.storage)?;
+        let owned_tokens: cw721::TokensResponse = deps.querier.query_wasm_smart(
+            nft,
+            &cw721::Cw721QueryMsg::Tokens {
+                owner: voter.to_string(),
+                start_after: None,
+                limit: None,
+            },
+        )?;
+
+        // If the voter no longer owns the token, unregister them.
+        if owned_tokens.tokens.is_empty() || owned_tokens.tokens[0] != token_id {
+            let hook_msgs = unregister_voter(deps.storage, &env, voter, &token_id)?;
+
+            response = response
+                .add_attribute("unregistered_voter", voter)
+                .add_submessages(hook_msgs);
+        }
+    }
+
+    Ok(response)
+}
+
 pub fn execute_add_hook(
     deps: DepsMut,
     info: MessageInfo,
@@ -327,6 +337,37 @@ pub fn execute_update_owner(
 
     let ownership = cw_ownable::update_ownership(deps, &env.block, &sender, action)?;
     Ok(Response::default().add_attributes(ownership.into_attributes()))
+}
+
+/// Unregister a voter, returning unstake hook submessages if successful.
+fn unregister_voter(
+    storage: &mut dyn Storage,
+    env: &Env,
+    voter: &Addr,
+    token_id: &String,
+) -> Result<Vec<SubMsg>, ContractError> {
+    // Clear voter <-> token state.
+    VOTER_TOKENS.remove(storage, voter);
+    TOKENS.update(storage, token_id, |token| -> StdResult<_> {
+        let mut token = token.expect("token should exist but could not be found");
+        token.voter = None;
+        Ok(token)
+    })?;
+
+    let curr_voting_power = VOTER_VOTING_POWER.load(storage, voter)?;
+
+    // Remove voter's VP and update total VP.
+    VOTER_VOTING_POWER.remove(storage, voter, env.block.height)?;
+    TOTAL_VOTING_POWER.update(storage, env.block.height, |total| -> StdResult<_> {
+        total
+            .expect("total voting power should be set but could not be found")
+            .checked_sub(curr_voting_power)
+            .map_err(StdError::overflow)
+    })?;
+
+    let hook_msgs = unstake_nft_hook_msgs(HOOKS, storage, voter.clone(), vec![token_id.clone()])?;
+
+    Ok(hook_msgs)
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]

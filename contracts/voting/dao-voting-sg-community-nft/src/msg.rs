@@ -22,6 +22,10 @@ pub enum ExecuteMsg {
     /// Set the voting power for a token. Only callable by the DAO that
     /// initialized this voting contract or the owner.
     SetVotingPower { token_id: String, power: Uint128 },
+    /// Ensure the ownership of the NFT is up to date. If a voter registered
+    /// this token, verify they still own it. If not, unregister them. This can
+    /// be called by anyone.
+    Sync { token_id: String },
     /// Adds a hook which is called on registration / unregistration events.
     /// Only callable by the DAO that initialized this voting contract or the
     /// owner.
