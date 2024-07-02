@@ -117,6 +117,7 @@ pub fn execute_register(
 
     // Update existing token with new voter or save new token.
     TOKENS.save(deps.storage, token_id, &token)?;
+    VOTER_TOKENS.save(deps.storage, &info.sender, token_id)?;
 
     // Set voter's VP to token's VP and update total VP.
     let adder = |prev: Option<Uint128>| {
@@ -309,11 +310,14 @@ pub fn execute_update_owner(
     env: Env,
     action: cw_ownable::Action,
 ) -> Result<Response, ContractError> {
-    // If renouncing ownership, set the DAO as the owner instead.
+    // If renouncing ownership, set the DAO as the owner instead. Allow the DAO
+    // to execute this action on behalf of the current owner.
     if action == cw_ownable::Action::RenounceOwnership {
-        cw_ownable::assert_owner(deps.storage, &info.sender)?;
-
         let dao = DAO.load(deps.storage)?;
+        if info.sender != dao {
+            cw_ownable::assert_owner(deps.storage, &info.sender)?;
+        }
+
         cw_ownable::initialize_owner(deps.storage, deps.api, Some(dao.as_str()))?;
 
         return Ok(Response::default()
