@@ -70,6 +70,18 @@ pub fn query_info(app: &App, module: &Addr) -> StdResult<InfoResponse> {
     Ok(info)
 }
 
+pub fn query_dao(app: &App, module: &Addr) -> StdResult<Addr> {
+    let dao = app.wrap().query_wasm_smart(module, &QueryMsg::Dao {})?;
+    Ok(dao)
+}
+
+pub fn query_nft_contract(app: &App, module: &Addr) -> StdResult<Addr> {
+    let nft = app
+        .wrap()
+        .query_wasm_smart(module, &QueryMsg::NftContract {})?;
+    Ok(nft)
+}
+
 pub fn query_ownership(app: &App, module: &Addr) -> StdResult<Ownership<Addr>> {
     let ownership = app
         .wrap()

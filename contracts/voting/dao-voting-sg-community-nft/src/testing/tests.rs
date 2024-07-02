@@ -14,8 +14,9 @@ use crate::{
         },
         is_error,
         queries::{
-            query_hooks, query_info, query_list_voters, query_ownership, query_registered_nft,
-            query_total_and_voting_power, query_total_power, query_voting_power,
+            query_dao, query_hooks, query_info, query_list_voters, query_nft_contract,
+            query_ownership, query_registered_nft, query_total_and_voting_power, query_total_power,
+            query_voting_power,
         },
         setup_test, CommonTest, CREATOR_ADDR, OWNER,
     },
@@ -43,6 +44,10 @@ fn test_register() -> anyhow::Result<()> {
     mint_and_register_nft(&mut app, &nft, &module, CREATOR_ADDR, "1")?;
     mint_and_register_nft(&mut app, &nft, &module, "other", "2")?;
 
+    // I cannot register if already registered.
+    let res = register(&mut app, &module, CREATOR_ADDR);
+    is_error!(res => "You are already registered to vote");
+
     // Voting powers are not updated until a block has passed.
     let (total, personal) = query_total_and_voting_power(&app, &module, CREATOR_ADDR, None)?;
     assert!(total.is_zero());
@@ -53,6 +58,42 @@ fn test_register() -> anyhow::Result<()> {
     let (total, personal) = query_total_and_voting_power(&app, &module, CREATOR_ADDR, None)?;
     assert_eq!(total, Uint128::new(2));
     assert_eq!(personal, Uint128::new(1));
+
+    Ok(())
+}
+
+// I can register, voting power and total power is updated one block later.
+#[test]
+fn test_register_errors() -> anyhow::Result<()> {
+    let CommonTest {
+        mut app,
+        module,
+        nft,
+    } = setup_test();
+    // I need an NFT before I can register.
+    let res = register(&mut app, &module, CREATOR_ADDR);
+    is_error!(res => "You must own an NFT before registering to vote");
+
+    // I cannot have more than one NFT to register. This expects the NFT
+    // contract to only allow one NFT per address.
+    mint_nft(&mut app, &nft, CREATOR_ADDR, "first")?;
+    mint_nft(&mut app, &nft, CREATOR_ADDR, "second_illegal")?;
+    let res = register(&mut app, &module, CREATOR_ADDR);
+    is_error!(res => "You should not be able to own more than one NFT at a time");
+
+    burn_nft(&mut app, &nft, CREATOR_ADDR, "second_illegal")?;
+
+    register(&mut app, &module, CREATOR_ADDR)?;
+
+    // Another user should not be able to hold a token that was previously held
+    // by a different user.
+
+    // Burn and mint same NFT to another user, while already registered.
+    burn_nft(&mut app, &nft, CREATOR_ADDR, "first")?;
+    mint_nft(&mut app, &nft, "other", "first")?;
+
+    let res = register(&mut app, &module, "other");
+    is_error!(res => "Your NFT was somehow registered by another voter");
 
     Ok(())
 }
@@ -290,10 +331,18 @@ fn test_list_voters_and_get_registered_nfts() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_info_query_works() -> anyhow::Result<()> {
-    let CommonTest { app, module, .. } = setup_test();
+fn test_queries() -> anyhow::Result<()> {
+    let CommonTest { app, module, nft } = setup_test();
+
     let info = query_info(&app, &module)?;
     assert_eq!(info.info.version, env!("CARGO_PKG_VERSION").to_string());
+
+    let dao = query_dao(&app, &module)?;
+    assert_eq!(dao, CREATOR_ADDR.to_string());
+
+    let nft_contract = query_nft_contract(&app, &module)?;
+    assert_eq!(nft_contract, nft.to_string());
+
     Ok(())
 }
 
@@ -329,6 +378,9 @@ fn test_add_remove_hooks() -> anyhow::Result<()> {
     is_error!(res => "Given address not registered as a hook");
 
     let res = add_hook(&mut app, &module, "ekez", "evil");
+    is_error!(res => "Caller is not the contract's current owner");
+
+    let res = remove_hook(&mut app, &module, "ekez", "evil");
     is_error!(res => "Caller is not the contract's current owner");
 
     Ok(())
